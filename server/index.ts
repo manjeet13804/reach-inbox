@@ -1,10 +1,37 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
-
+ 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+
+// Enhanced cache control middleware for API routes
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api')) {
+    // Set aggressive headers to prevent caching
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '-1');
+    res.setHeader('Surrogate-Control', 'no-store');
+    
+    // Generate a truly unique ETag for each request using timestamp + random value
+    const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+    res.setHeader('ETag', `W/"${uniqueId}"`);
+    
+    // Disable If-Modified-Since behavior
+    res.setHeader('Last-Modified', (new Date()).toUTCString());
+    
+    // Add timestamp to query params for GET requests to force fresh responses
+    if (req.method === 'GET') {
+      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      url.searchParams.set('_t', uniqueId);
+      req.url = url.pathname + url.search;
+    }
+  }
+  next();
+});
 
 // Request logging middleware
 app.use((req, res, next) => {

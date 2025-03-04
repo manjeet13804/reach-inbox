@@ -93,6 +93,87 @@ export async function registerRoutes(app: Express) {
   const startTime = Date.now();
 
   try {
+    // Initialize IMAP clients and sync emails
+    await setupImapClients();
+
+    // Email routes
+    app.get('/api/emails', async (req, res) => {
+      const { search, category, folder, accountId } = req.query;
+      try {
+        if (category && typeof category !== 'string') {
+          return res.status(400).json({ error: 'Invalid category parameter' });
+        }
+        if (folder && typeof folder !== 'string') {
+          return res.status(400).json({ error: 'Invalid folder parameter' });
+        }
+        if (search && typeof search !== 'string') {
+          return res.status(400).json({ error: 'Invalid search parameter' });
+        }
+        if (accountId && typeof accountId !== 'string') {
+          return res.status(400).json({ error: 'Invalid accountId parameter' });
+        }
+
+        const emails = await storage.getEmails({
+          accountId: accountId as string,
+          search: search as string,
+          category: category as string,
+          folder: folder as string
+        });
+
+        // Set aggressive cache control headers to prevent 304 Not Modified responses
+        res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate, max-age=0, s-maxage=0, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '-1');
+        res.setHeader('Surrogate-Control', 'no-store');
+        
+        // Generate a truly unique ETag with timestamp and random value
+        const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+        res.setHeader('ETag', `W/"${uniqueId}"`);
+        
+        // Disable If-Modified-Since behavior
+        res.setHeader('Last-Modified', (new Date()).toUTCString());
+
+        res.json(emails);
+      } catch (error) {
+        console.error('Error fetching emails:', error);
+        res.status(500).json({ error: 'Failed to fetch emails' });
+      }
+    });
+
+    // Add IMAP account route
+    app.post('/api/accounts', async (req, res) => {
+      try {
+        const accountData = insertImapAccountSchema.parse(req.body);
+        const account = await storage.addImapAccount(accountData);
+        await addImapClient(account);
+        res.json(account);
+      } catch (error) {
+        res.status(400).json({ error: 'Invalid account data' });
+      }
+    });
+
+    // Categorize email route
+    app.post('/api/emails/:id/categorize', async (req, res) => {
+      const emailId = parseInt(req.params.id);
+      try {
+        const email = await storage.getEmail(emailId);
+        if (!email) {
+          return res.status(404).json({ error: 'Email not found' });
+        }
+        const category = await categorizeEmail(email.subject, email.body);
+        const updatedEmail = await storage.updateEmailCategory(emailId, category);
+        
+        if (category === "INTERESTED") {
+          await sendInterestedEmailNotification(updatedEmail);
+          await sendWebhookNotification(updatedEmail);
+        }
+        
+        res.json(updatedEmail);
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to categorize email' });
+      }
+    });
+
     // Add test data in development
     if (process.env.NODE_ENV !== "production") {
       log("Development mode detected, adding test data...");
@@ -114,57 +195,17 @@ export async function registerRoutes(app: Express) {
       res.json(accounts);
     });
 
-    app.post("/api/accounts", async (req, res) => {
-      const parsed = insertImapAccountSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: parsed.error });
-      }
-
-      const account = await storage.addImapAccount(parsed.data);
-      if (process.env.NODE_ENV === "production") {
-        await addImapClient(account);
-      }
-      res.json(account);
-    });
-
-    app.delete("/api/accounts/:id", async (req, res) => {
-      const id = parseInt(req.params.id);
-      if (process.env.NODE_ENV === "production") {
-        await removeImapClient(id);
-      }
-      await storage.removeImapAccount(id);
-      res.sendStatus(200);
-    });
-
-    // Email Routes
-    app.get("/api/emails", async (req, res) => {
-      const { accountId, folder, category, search } = req.query;
-      const emails = await storage.getEmails({
-        accountId: accountId as string,
-        folder: folder as string,
-        category: category as string,
-        search: search as string
-      });
-      res.json(emails);
-    });
-
-    app.post("/api/emails/:id/categorize", async (req, res) => {
-      const id = parseInt(req.params.id);
-      const email = await storage.getEmail(id);
-      if (!email) {
-        return res.status(404).json({ error: "Email not found" });
-      }
-
-      const category = await categorizeEmail(email.subject, email.body);
-      const updatedEmail = await storage.updateEmailCategory(id, category);
-
-      if (category === "INTERESTED") {
-        await sendInterestedEmailNotification(updatedEmail);
-        await sendWebhookNotification(updatedEmail);
-      }
-
-      res.json(updatedEmail);
-    });
+    // This route is now handled above with better error handling
+    // app.get("/api/emails", async (req, res) => {
+    //   const { accountId, folder, category, search } = req.query;
+    //   const emails = await storage.getEmails({
+    //     accountId: accountId as string,
+    //     folder: folder as string,
+    //     category: category as string,
+    //     search: search as string
+    //   });
+    //   res.json(emails);
+    // });
 
     log(`Routes registration completed in ${Date.now() - startTime}ms`);
     return createServer(app);

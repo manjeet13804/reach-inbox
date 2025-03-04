@@ -66,33 +66,36 @@ export class MemStorage implements IStorage {
     let emails = Array.from(this.emails.values());
 
     if (options.accountId) {
-      emails = emails.filter(e => e.accountId === options.accountId);
+      emails = emails.filter((email) => email.accountId === options.accountId);
     }
 
     if (options.folder) {
-      emails = emails.filter(e => e.folder === options.folder);
+      emails = emails.filter((email) => email.folder === options.folder);
     }
 
     if (options.category) {
-      emails = emails.filter(e => e.category === options.category);
+      emails = emails.filter((email) => email.category === options.category);
     }
 
     if (options.search) {
       const searchLower = options.search.toLowerCase();
-      emails = emails.filter(e =>
-        e.subject.toLowerCase().includes(searchLower) ||
-        e.body.toLowerCase().includes(searchLower)
+      emails = emails.filter(
+        (email) =>
+          email.subject.toLowerCase().includes(searchLower) ||
+          email.from.toLowerCase().includes(searchLower) ||
+          email.to.toLowerCase().includes(searchLower) ||
+          (email.body && email.body.toLowerCase().includes(searchLower)),
       );
     }
 
-    return emails.sort((a, b) => 
-      new Date(b.date).getTime() - new Date(a.date).getTime()
-    );
+    return emails;
   }
 
   async updateEmailCategory(id: number, category: string): Promise<Email> {
-    const email = await this.getEmail(id);
-    if (!email) throw new Error("Email not found");
+    const email = this.emails.get(id);
+    if (!email) {
+      throw new Error(`Email with id ${id} not found`);
+    }
     
     const updatedEmail = { ...email, category };
     this.emails.set(id, updatedEmail);

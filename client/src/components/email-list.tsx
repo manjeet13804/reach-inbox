@@ -4,8 +4,9 @@ import { type Email } from "@shared/schema";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { formatDistanceToNow } from "date-fns";
+import { Loader2 } from "lucide-react";
 
 interface EmailListProps {
   search: string;
@@ -14,23 +15,64 @@ interface EmailListProps {
 }
 
 export default function EmailList({ search, category, folder }: EmailListProps) {
-  const { data: emails, isLoading } = useQuery<Email[]>({
-    queryKey: ['/api/emails', { search, category, folder }]
-  });
-
+  const { data: emails, isLoading, error } = useQuery<Email[]>({    
+    queryKey: ['/api/emails', { search, category, folder }],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (search && search.trim()) params.append('search', search.trim());
+      if (category && category !== 'all') params.append('category', category);
+      if (folder && folder !== 'all') params.append('folder', folder);
+      
+      const res = await apiRequest('GET', `/api/emails?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error('Failed to fetch emails');
+      }
+      return res.json();
+    },
+    enabled: true,
+    staleTime: 1000 * 60, // 1 minute
+    cacheTime: 1000 * 60 * 5, // 5 minutes
+    refetchOnWindowFocus: true,
+    refetchOnMount: true,
+    retry: 3,
+    retryDelay: 1000,
+    refetchInterval: false
   const categorizeMutation = useMutation({
     mutationFn: async (emailId: number) => {
       const res = await apiRequest('POST', `/api/emails/${emailId}/categorize`);
       return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emails'] });
     }
   });
 
+  if (error) {
+    return (
+      <Card>
+        <CardContent className="p-6 text-center text-red-500">
+          Error loading emails. Please try again.
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (isLoading) {
-    return <div>Loading...</div>;
+    return (
+      <div className="flex justify-center items-center py-8">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
   }
 
   if (!emails?.length) {
-    return <div>No emails found</div>;
+    return (
+      <Card>
+        <CardContent className="p-6 text-center text-muted-foreground">
+          No emails found. Try adjusting your search or filters.
+        </CardContent>
+      </Card>
+    );
   }
 
   function getCategoryColor(category: string | null) {
@@ -68,7 +110,14 @@ export default function EmailList({ search, category, folder }: EmailListProps) 
                     onClick={() => categorizeMutation.mutate(email.id)}
                     disabled={categorizeMutation.isPending}
                   >
-                    Categorize
+                    {categorizeMutation.isPending ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Categorizing...
+                      </>
+                    ) : (
+                      'Categorize'
+                    )}
                   </Button>
                 )}
                 <span className="text-sm text-muted-foreground">
