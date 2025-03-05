@@ -36,7 +36,9 @@ export default function EmailList({ search, category, folder }: EmailListProps) 
     refetchOnMount: true,
     retry: 3,
     retryDelay: 1000,
-    refetchInterval: false
+    refetchInterval: false,
+  });
+
   const categorizeMutation = useMutation({
     mutationFn: async (emailId: number) => {
       const res = await apiRequest('POST', `/api/emails/${emailId}/categorize`);

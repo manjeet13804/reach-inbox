@@ -40,27 +40,27 @@ var MemStorage = class {
   async getEmails(options) {
     let emails2 = Array.from(this.emails.values());
     if (options.accountId) {
-      emails2 = emails2.filter((e) => e.accountId === options.accountId);
+      emails2 = emails2.filter((email) => email.accountId === options.accountId);
     }
     if (options.folder) {
-      emails2 = emails2.filter((e) => e.folder === options.folder);
+      emails2 = emails2.filter((email) => email.folder === options.folder);
     }
     if (options.category) {
-      emails2 = emails2.filter((e) => e.category === options.category);
+      emails2 = emails2.filter((email) => email.category === options.category);
     }
     if (options.search) {
       const searchLower = options.search.toLowerCase();
       emails2 = emails2.filter(
-        (e) => e.subject.toLowerCase().includes(searchLower) || e.body.toLowerCase().includes(searchLower)
+        (email) => email.subject.toLowerCase().includes(searchLower) || email.from.toLowerCase().includes(searchLower) || email.to.toLowerCase().includes(searchLower) || email.body && email.body.toLowerCase().includes(searchLower)
       );
     }
-    return emails2.sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-    );
+    return emails2;
   }
   async updateEmailCategory(id, category) {
-    const email = await this.getEmail(id);
-    if (!email) throw new Error("Email not found");
+    const email = this.emails.get(id);
+    if (!email) {
+      throw new Error(`Email with id ${id} not found`);
+    }
     const updatedEmail = { ...email, category };
     this.emails.set(id, updatedEmail);
     return updatedEmail;
@@ -87,54 +87,40 @@ var ImapClient = class {
     });
   }
   async connect() {
-    await this.client.connect();
-  }
-  async disconnect() {
-    await this.client.logout();
-  }
-  async syncEmails() {
-    const cutoffDate = /* @__PURE__ */ new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 30);
-    await this.client.mailboxOpen("INBOX");
-    const messages = await this.client.fetch("1:*", {
-      uid: true,
-      envelope: true,
-      bodyStructure: true,
-      bodyParts: ["text"]
-    });
-    for await (const message of messages) {
-      if (new Date(message.envelope.date) < cutoffDate) continue;
-      const email = {
-        accountId: this.account.id.toString(),
-        messageId: message.uid.toString(),
-        from: message.envelope.from[0].address,
-        to: message.envelope.to[0].address,
-        subject: message.envelope.subject,
-        body: message.bodyParts.get("text")?.toString() || "",
-        date: new Date(message.envelope.date),
-        folder: "INBOX",
-        category: null,
-        metadata: {}
-      };
-      await storage.addEmail(email);
+    try {
+      await this.client.connect();
+    } catch (error) {
+      console.error(`Failed to connect to IMAP server for account ${this.account.id}:`, error);
+      throw error;
     }
   }
-  async watchInbox() {
-    await this.client.mailboxOpen("INBOX");
-    this.client.on("exists", async (data) => {
-      const messages = await this.client.fetch(data.seq, {
+  async disconnect() {
+    try {
+      await this.client.logout();
+    } catch (error) {
+      console.error(`Failed to disconnect from IMAP server for account ${this.account.id}:`, error);
+      throw error;
+    }
+  }
+  async syncEmails() {
+    try {
+      const cutoffDate = /* @__PURE__ */ new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - 30);
+      await this.client.mailboxOpen("INBOX");
+      const messages = await this.client.fetch("1:*", {
         uid: true,
         envelope: true,
         bodyStructure: true,
         bodyParts: ["text"]
       });
       for await (const message of messages) {
+        if (new Date(message.envelope.date) < cutoffDate) continue;
         const email = {
           accountId: this.account.id.toString(),
           messageId: message.uid.toString(),
-          from: message.envelope.from[0].address,
-          to: message.envelope.to[0].address,
-          subject: message.envelope.subject,
+          from: message.envelope.from?.[0]?.address || "",
+          to: message.envelope.to?.[0]?.address || "",
+          subject: message.envelope.subject || "",
           body: message.bodyParts.get("text")?.toString() || "",
           date: new Date(message.envelope.date),
           folder: "INBOX",
@@ -143,7 +129,45 @@ var ImapClient = class {
         };
         await storage.addEmail(email);
       }
-    });
+    } catch (error) {
+      console.error(`Failed to sync emails for account ${this.account.id}:`, error);
+      throw error;
+    }
+  }
+  async watchInbox() {
+    try {
+      await this.client.mailboxOpen("INBOX");
+      this.client.on("exists", async (data) => {
+        try {
+          const messages = await this.client.fetch(data.seq, {
+            uid: true,
+            envelope: true,
+            bodyStructure: true,
+            bodyParts: ["text"]
+          });
+          for await (const message of messages) {
+            const email = {
+              accountId: this.account.id.toString(),
+              messageId: message.uid.toString(),
+              from: message.envelope.from?.[0]?.address || "",
+              to: message.envelope.to?.[0]?.address || "",
+              subject: message.envelope.subject || "",
+              body: message.bodyParts.get("text")?.toString() || "",
+              date: new Date(message.envelope.date),
+              folder: "INBOX",
+              category: null,
+              metadata: {}
+            };
+            await storage.addEmail(email);
+          }
+        } catch (error) {
+          console.error(`Failed to process new email for account ${this.account.id}:`, error);
+        }
+      });
+    } catch (error) {
+      console.error(`Failed to watch inbox for account ${this.account.id}:`, error);
+      throw error;
+    }
   }
 };
 var imapClients = /* @__PURE__ */ new Map();
@@ -152,13 +176,18 @@ async function setupImapClients() {
     console.log("Development mode: IMAP client setup skipped");
     return;
   }
-  const accounts = await storage.getImapAccounts();
-  for (const account of accounts) {
-    const client = new ImapClient(account);
-    await client.connect();
-    await client.syncEmails();
-    await client.watchInbox();
-    imapClients.set(account.id, client);
+  try {
+    const accounts = await storage.getImapAccounts();
+    for (const account of accounts) {
+      const client = new ImapClient(account);
+      await client.connect();
+      await client.syncEmails();
+      await client.watchInbox();
+      imapClients.set(account.id, client);
+    }
+  } catch (error) {
+    console.error("Failed to setup IMAP clients:", error);
+    throw error;
   }
 }
 async function addImapClient(account) {
@@ -166,21 +195,15 @@ async function addImapClient(account) {
     console.log("Development mode: IMAP client creation skipped");
     return;
   }
-  const client = new ImapClient(account);
-  await client.connect();
-  await client.syncEmails();
-  await client.watchInbox();
-  imapClients.set(account.id, client);
-}
-async function removeImapClient(accountId) {
-  if (process.env.NODE_ENV === "development") {
-    console.log("Development mode: IMAP client removal skipped");
-    return;
-  }
-  const client = imapClients.get(accountId);
-  if (client) {
-    await client.disconnect();
-    imapClients.delete(accountId);
+  try {
+    const client = new ImapClient(account);
+    await client.connect();
+    await client.syncEmails();
+    await client.watchInbox();
+    imapClients.set(account.id, client);
+  } catch (error) {
+    console.error(`Failed to add IMAP client for account ${account.id}:`, error);
+    throw error;
   }
 }
 
@@ -412,6 +435,69 @@ async function addTestData() {
 async function registerRoutes(app2) {
   const startTime = Date.now();
   try {
+    await setupImapClients();
+    app2.get("/api/emails", async (req, res) => {
+      const { search, category, folder, accountId } = req.query;
+      try {
+        if (category && typeof category !== "string") {
+          return res.status(400).json({ error: "Invalid category parameter" });
+        }
+        if (folder && typeof folder !== "string") {
+          return res.status(400).json({ error: "Invalid folder parameter" });
+        }
+        if (search && typeof search !== "string") {
+          return res.status(400).json({ error: "Invalid search parameter" });
+        }
+        if (accountId && typeof accountId !== "string") {
+          return res.status(400).json({ error: "Invalid accountId parameter" });
+        }
+        const emails2 = await storage.getEmails({
+          accountId,
+          search,
+          category,
+          folder
+        });
+        res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate, max-age=0, s-maxage=0, proxy-revalidate");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("Expires", "-1");
+        res.setHeader("Surrogate-Control", "no-store");
+        const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+        res.setHeader("ETag", `W/"${uniqueId}"`);
+        res.setHeader("Last-Modified", (/* @__PURE__ */ new Date()).toUTCString());
+        res.json(emails2);
+      } catch (error) {
+        console.error("Error fetching emails:", error);
+        res.status(500).json({ error: "Failed to fetch emails" });
+      }
+    });
+    app2.post("/api/accounts", async (req, res) => {
+      try {
+        const accountData = insertImapAccountSchema.parse(req.body);
+        const account = await storage.addImapAccount(accountData);
+        await addImapClient(account);
+        res.json(account);
+      } catch (error) {
+        res.status(400).json({ error: "Invalid account data" });
+      }
+    });
+    app2.post("/api/emails/:id/categorize", async (req, res) => {
+      const emailId = parseInt(req.params.id);
+      try {
+        const email = await storage.getEmail(emailId);
+        if (!email) {
+          return res.status(404).json({ error: "Email not found" });
+        }
+        const category = await categorizeEmail(email.subject, email.body);
+        const updatedEmail = await storage.updateEmailCategory(emailId, category);
+        if (category === "INTERESTED") {
+          await sendInterestedEmailNotification(updatedEmail);
+          await sendWebhookNotification(updatedEmail);
+        }
+        res.json(updatedEmail);
+      } catch (error) {
+        res.status(500).json({ error: "Failed to categorize email" });
+      }
+    });
     if (process.env.NODE_ENV !== "production") {
       log("Development mode detected, adding test data...");
       await addTestData();
@@ -426,49 +512,6 @@ async function registerRoutes(app2) {
     app2.get("/api/accounts", async (_req, res) => {
       const accounts = await storage.getImapAccounts();
       res.json(accounts);
-    });
-    app2.post("/api/accounts", async (req, res) => {
-      const parsed = insertImapAccountSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: parsed.error });
-      }
-      const account = await storage.addImapAccount(parsed.data);
-      if (process.env.NODE_ENV === "production") {
-        await addImapClient(account);
-      }
-      res.json(account);
-    });
-    app2.delete("/api/accounts/:id", async (req, res) => {
-      const id = parseInt(req.params.id);
-      if (process.env.NODE_ENV === "production") {
-        await removeImapClient(id);
-      }
-      await storage.removeImapAccount(id);
-      res.sendStatus(200);
-    });
-    app2.get("/api/emails", async (req, res) => {
-      const { accountId, folder, category, search } = req.query;
-      const emails2 = await storage.getEmails({
-        accountId,
-        folder,
-        category,
-        search
-      });
-      res.json(emails2);
-    });
-    app2.post("/api/emails/:id/categorize", async (req, res) => {
-      const id = parseInt(req.params.id);
-      const email = await storage.getEmail(id);
-      if (!email) {
-        return res.status(404).json({ error: "Email not found" });
-      }
-      const category = await categorizeEmail(email.subject, email.body);
-      const updatedEmail = await storage.updateEmailCategory(id, category);
-      if (category === "INTERESTED") {
-        await sendInterestedEmailNotification(updatedEmail);
-        await sendWebhookNotification(updatedEmail);
-      }
-      res.json(updatedEmail);
     });
     log(`Routes registration completed in ${Date.now() - startTime}ms`);
     return createServer(app2);
@@ -549,6 +592,23 @@ function serveStatic(app2) {
 var app = express2();
 app.use(express2.json());
 app.use(express2.urlencoded({ extended: false }));
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api")) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "-1");
+    res.setHeader("Surrogate-Control", "no-store");
+    const uniqueId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+    res.setHeader("ETag", `W/"${uniqueId}"`);
+    res.setHeader("Last-Modified", (/* @__PURE__ */ new Date()).toUTCString());
+    if (req.method === "GET") {
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      url.searchParams.set("_t", uniqueId);
+      req.url = url.pathname + url.search;
+    }
+  }
+  next();
+});
 app.use((req, res, next) => {
   const start = Date.now();
   const path3 = req.path;
